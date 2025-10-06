@@ -1,18 +1,29 @@
 // components/Interviewer.js
+
 import React, { useState, useMemo } from "react";
 import { useSelector } from "react-redux";
-import { Table, Modal, Typography } from "antd";
+import { Table, Modal, Typography, Input } from "antd";
 
 const { Title, Text } = Typography;
 
 export default function Interviewer() {
   const candidates = useSelector((state) => state.candidates.list);
   const [selected, setSelected] = useState(null);
+  const [searchTerm, setSearchTerm] = useState("");
 
   // Sort candidates by score (descending), handle undefined score
   const sortedCandidates = useMemo(() => {
     return [...candidates].sort((a, b) => (b.score || 0) - (a.score || 0));
   }, [candidates]);
+
+  // Filter candidates based on search term
+  const filteredCandidates = useMemo(() => {
+    return sortedCandidates.filter(
+      (c) =>
+        c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (c.email && c.email.toLowerCase().includes(searchTerm.toLowerCase()))
+    );
+  }, [sortedCandidates, searchTerm]);
 
   const columns = [
     { title: "Name", dataIndex: "name", key: "name" },
@@ -32,15 +43,25 @@ export default function Interviewer() {
     <div style={{ padding: "20px" }}>
       <Title level={3}>Candidate Dashboard</Title>
 
+      {/* Search input */}
+      <Input
+        placeholder="Search candidates..."
+        value={searchTerm}
+        onChange={(e) => setSearchTerm(e.target.value)}
+        style={{ marginBottom: "10px" }}
+      />
+
+      {/* Candidates table */}
       <Table
         columns={columns}
-        dataSource={sortedCandidates.map((c) => ({ ...c, key: c.id }))}
+        dataSource={filteredCandidates.map((c) => ({ ...c, key: c.id }))}
         onRow={(record) => ({
           onClick: () => setSelected(record),
         })}
         pagination={{ pageSize: 5 }}
       />
 
+      {/* Candidate detail modal */}
       {selected && (
         <Modal
           open={!!selected}
@@ -56,13 +77,16 @@ export default function Interviewer() {
           <Text strong>Answers:</Text>
           {selected.answers.length === 0 && <div>No answers submitted</div>}
           {selected.answers.map((a, i) => (
-            <div key={i} style={{ margin: "5px 0", padding: "5px", borderBottom: "1px solid #f0f0f0" }}>
+            <div
+              key={i}
+              style={{ margin: "5px 0", padding: "5px", borderBottom: "1px solid #f0f0f0" }}
+            >
               <Text strong>Q{i + 1}:</Text> {a.question} <br />
-              <Text strong>A{i + 1}:</Text> {a.answer || "No Answer"}
+              <Text strong>A{i + 1}:</Text> {a.answer || "No Answer"} <br />
+              <Text strong>Score:</Text> {a.score || 0}
             </div>
           ))}
-          <Text strong>AI Summary:</Text> This candidate answered {selected.answers.length} question
-          {selected.answers.length > 1 ? "s" : ""}.
+          <Text strong>AI Summary:</Text> {selected.summary || "No summary yet"}
         </Modal>
       )}
     </div>

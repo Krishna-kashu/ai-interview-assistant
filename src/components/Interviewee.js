@@ -7,141 +7,193 @@ import {
   completeCandidate,
 } from "../redux/store";
 import { parseResume } from "../utils/resumeParser";
-import { Button, Upload, Input, Modal, Progress, Typography, message } from "antd";
+import { generateQuestions, scoreAnswer, finalizeCandidate } from "../api/aiApi";
+import {
+  Button,
+  Upload,
+  Input,
+  Modal,
+  Progress,
+  Typography,
+  message,
+} from "antd";
 import { InboxOutlined } from "@ant-design/icons";
 
 const { Dragger } = Upload;
 const { Title, Text } = Typography;
 
-const questions = [
-  { level: "Easy", time: 20, question: "What is React?" },
-  { level: "Easy", time: 20, question: "Explain useState hook." },
-  { level: "Medium", time: 60, question: "Describe Redux and its benefits." },
-  { level: "Medium", time: 60, question: "Explain React lifecycle methods." },
-  { level: "Hard", time: 120, question: "How would you optimize React performance?" },
-  { level: "Hard", time: 120, question: "Explain context API vs Redux." },
-];
-
-// Simple scoring function: 10 points for each non-empty answer
-const calculateScore = (answers) =>
-  answers.reduce((total, ans) => total + (ans.answer.trim() ? 10 : 0), 0);
-
 export default function Interviewee() {
   const dispatch = useDispatch();
-  const currentCandidate = useSelector((state) => state.candidates.currentCandidate);
+  const currentCandidate = useSelector(
+    (state) => state.candidates.currentCandidate
+  );
 
   const intervalRef = useRef(null);
-  const [step, setStep] = useState(0); // 0: Upload, 1: Fill Missing, 2: Interview, 3: Completed
-  const [candidate, setCandidate] = useState({ name: "", email: "", phone: "", answers: [] });
+  const [step, setStep] = useState(0);
+  const [candidate, setCandidate] = useState({
+    id: null,
+    name: "",
+    email: "",
+    phone: "",
+    answers: [],
+    questions: [],
+    summary: "",
+  });
   const [timer, setTimer] = useState(0);
   const [currentQIndex, setCurrentQIndex] = useState(0);
   const [answer, setAnswer] = useState("");
   const [showModal, setShowModal] = useState(false);
-  const [logs, setLogs] = useState([]);
 
-  const addLog = (msg) => {
-    console.log(msg);
-    setLogs((prev) => [msg, ...prev]);
-  };
+  // Debug: log state
+  console.log("Current Candidate from Redux:", currentCandidate);
+  console.log("Local Candidate state:", candidate, "Step:", step);
 
   // Resume previous session
   useEffect(() => {
-    if (currentCandidate && !currentCandidate.completed) {
-      addLog("Resuming previous candidate: " + JSON.stringify(currentCandidate));
-      setCandidate(currentCandidate);
-      setCurrentQIndex(currentCandidate.answers.length || 0);
+  if (currentCandidate && !currentCandidate.completed) {
+    setCandidate(currentCandidate);
+    const answers = Array.isArray(currentCandidate.answers) ? currentCandidate.answers : [];
+    setCurrentQIndex(answers.length);
+    setStep(answers.length > 0 ? 2 : 0);
+    if (answers.length > 0) setShowModal(true);
+  }
+}, [currentCandidate]);
+
+
+  // Fetch AI questions
+  const fetchQuestions = async () => {
+    try {
+      console.log("Fetching questions from AI API...");
+      const questions = await generateQuestions();
+      const safeQuestions = Array.isArray(questions) ? questions : [];
+      if (safeQuestions.length === 0) {
+        message.error("No questions returned from AI API");
+        console.warn("AI API returned no questions");
+        return;
+      }
+      const updatedCandidate = { ...candidate, questions: safeQuestions };
+      setCandidate(updatedCandidate);
+      dispatch(updateCandidate(updatedCandidate));
       setStep(2);
-      setShowModal(true);
-    } else if (currentCandidate && currentCandidate.completed) {
-      setCandidate(currentCandidate);
-      setStep(3);
+      setTimer(safeQuestions[0].time || 60);
+      console.log("Questions fetched:", safeQuestions);
+    } catch (err) {
+      console.error("Failed to fetch questions:", err);
+      message.error("Failed to generate questions");
     }
-  }, [currentCandidate]);
+  };
 
-  // Handle answer submission
-  const handleNext = useCallback(() => {
-    if (!candidate.name || !candidate.email || !candidate.phone) {
-      message.error("Cannot continue: missing candidate info.");
-      addLog("Candidate incomplete, cannot submit answer");
-      return;
+  // Submit answer
+  const handleNext = useCallback(async () => {
+    const questions = Array.isArray(candidate.questions) ? candidate.questions : [];
+    const answers = Array.isArray(candidate.answers) ? candidate.answers : [];
+
+    if (!answer.trim()) {
+      message.warning("Please enter an answer or it will be counted as empty.");
     }
 
-    const candidateId = candidate.id || Date.now();
-    const isLastQuestion = currentQIndex === questions.length - 1;
-
+    const currentQuestion = questions[currentQIndex] || {};
     const updatedCandidate = {
       ...candidate,
-      id: candidateId,
-      answers: [
-        ...candidate.answers,
-        { question: questions[currentQIndex].question, answer },
-      ],
-      completed: isLastQuestion,
+      answers: [...answers, { ...currentQuestion, answer }],
     };
-
-    addLog("Submitting answer: " + JSON.stringify(updatedCandidate));
     setCandidate(updatedCandidate);
     setAnswer("");
 
-    if (!candidate.id) dispatch(addCandidate(updatedCandidate));
-    else dispatch(updateCandidate(updatedCandidate));
+    console.log("Submitting answer for question:", currentQuestion.question);
 
+    // Call AI scoring
+    try {
+      const result = await scoreAnswer(
+        candidate.id || Date.now(),
+        currentQuestion.question || "",
+        answer
+      );
+      updatedCandidate.answers[currentQIndex].score = result.score;
+      console.log("Score received:", result.score);
+    } catch {
+      updatedCandidate.answers[currentQIndex].score = 0;
+      console.warn("Scoring failed, score set to 0");
+    }
+
+    dispatch(updateCandidate(updatedCandidate));
     dispatch(saveCurrentProgress(updatedCandidate));
 
-    if (isLastQuestion) {
-      const finalScore = calculateScore(updatedCandidate.answers);
-      dispatch(completeCandidate({ ...updatedCandidate, score: finalScore }));
-      message.success("Interview Completed! Score: " + finalScore);
-      setStep(3);
-      addLog(
-        "Interview completed for candidate ID " +
-          updatedCandidate.id +
-          " | Score: " +
-          finalScore
-      );
+    const isLast = currentQIndex === questions.length - 1;
+    if (isLast) {
+      try {
+        const summaryRes = await finalizeCandidate(candidate.id);
+        updatedCandidate.summary = summaryRes.summary || "";
+        dispatch(completeCandidate(updatedCandidate));
+        setCandidate(updatedCandidate);
+        setStep(3);
+        message.success("Interview Completed!");
+        console.log("Interview completed, summary:", updatedCandidate.summary);
+      } catch {
+        message.error("Failed to generate summary");
+      }
       if (intervalRef.current) clearInterval(intervalRef.current);
     } else {
       setCurrentQIndex(currentQIndex + 1);
+      setTimer(questions[currentQIndex + 1]?.time || 60);
     }
   }, [candidate, currentQIndex, answer, dispatch]);
 
   // Timer per question
   useEffect(() => {
-    if (step === 2 && currentQIndex < questions.length) {
-      setTimer(questions[currentQIndex].time);
-      if (intervalRef.current) clearInterval(intervalRef.current);
+    const questions = Array.isArray(candidate.questions) ? candidate.questions : [];
+    if (step !== 2 || questions.length === 0 || currentQIndex >= questions.length) return;
 
-      intervalRef.current = setInterval(() => {
-        setTimer((t) => {
-          if (t <= 1) {
-            handleNext();
-            return 0;
-          }
-          return t - 1;
-        });
-      }, 1000);
+    intervalRef.current = setInterval(() => {
+      setTimer((t) => {
+        if (t <= 1) {
+          handleNext().catch(console.error);
+          return 0;
+        }
+        return t - 1;
+      });
+    }, 1000);
 
-      return () => clearInterval(intervalRef.current);
-    }
-  }, [step, currentQIndex, handleNext]);
+    return () => clearInterval(intervalRef.current);
+  }, [step, candidate.questions, currentQIndex, handleNext]);
 
   // Fill missing fields
-  const handleFillMissing = () => {
+  const handleFillMissing = async () => {
     if (!candidate.name || !candidate.email || !candidate.phone) {
       message.error("Please fill all missing fields");
-      addLog("Fill missing fields error: candidate incomplete");
       return;
     }
-    const updatedCandidate = { ...candidate };
-    dispatch(saveCurrentProgress(updatedCandidate));
-    setCandidate(updatedCandidate);
-    setStep(2);
-    addLog("All missing fields filled, starting interview");
+    await fetchQuestions();
   };
+
+
+const handleFinish = async () => {
+  try {
+    const summaryRes = await finalizeCandidate(candidate.id);
+    const updatedCandidate = {
+      ...candidate,
+      summary: summaryRes.summary || "",
+      completed: true,
+    };
+    dispatch(completeCandidate(updatedCandidate));
+    setCandidate(updatedCandidate);
+    setStep(3); // Step 3: show completed summary
+    message.success("Interview Completed!");
+    if (intervalRef.current) clearInterval(intervalRef.current);
+  } catch (err) {
+    console.error(err);
+    message.error("Failed to finalize interview");
+  }
+};
+
+
+  const questions = Array.isArray(candidate.questions) ? candidate.questions : [];
+  const currentQuestion = questions[currentQIndex] || { question: "", level: "" };
+  const answers = Array.isArray(candidate.answers) ? candidate.answers : [];
+
 
   return (
     <div style={{ padding: "20px" }}>
-      {/* Welcome Back Modal */}
       {showModal && step === 2 && (
         <Modal
           open={showModal}
@@ -153,115 +205,114 @@ export default function Interviewee() {
         </Modal>
       )}
 
-      {/* Step 0: Upload Resume */}
-      {step === 0 && (
+      {/* Resume Upload */}
+      {(!candidate || step === 0) && (
         <>
-          <Title level={3}>Upload your Resume</Title>
+          <Title level={3}>Upload Resume</Title>
           <Dragger
             name="file"
             accept=".pdf,.docx"
             multiple={false}
             beforeUpload={async (file) => {
-              try {
-                const parsed = await parseResume(file);
+  console.log("File uploaded:", file.name);
+  const parsed = await parseResume(file);
+  const newCandidate = {
+    name: parsed.name || file.name.split(".")[0],
+    email: parsed.email || "",
+    phone: parsed.phone || "",
+    id: Date.now(),
+    answers: [],
+    questions: [],
+  };
+  setCandidate(newCandidate);
+  dispatch(addCandidate(newCandidate));
+  dispatch(saveCurrentProgress(newCandidate));
+  console.log("New candidate created:", newCandidate);
 
-                // Fallback if name is missing
-                const name = parsed.name || file.name.split(".")[0];
-                const newCandidate = {
-                  name,
-                  email: parsed.email || "",
-                  phone: parsed.phone || "",
-                  id: Date.now(),
-                  answers: [],
-                };
+  // Fetch questions immediately
+  await fetchQuestions();
 
-                addLog("Parsed resume: " + JSON.stringify(newCandidate));
+  // If missing fields, go to step 1
+  if (!newCandidate.name || !newCandidate.email || !newCandidate.phone) {
+    setStep(1);
+  } else {
+    setStep(2); // All fields present, go to questions
+  }
 
-                setCandidate(newCandidate);
-                dispatch(addCandidate(newCandidate));
-                dispatch(saveCurrentProgress(newCandidate));
+  return false;
+}}
 
-                if (!newCandidate.name || !newCandidate.email || !newCandidate.phone) {
-                  setStep(1);
-                  addLog("Missing fields detected, moving to step 1");
-                } else {
-                  setStep(2);
-                  addLog("All fields present, moving to step 2");
-                }
-
-                message.success(
-                  `Resume uploaded! Name: ${newCandidate.name}, Email: ${newCandidate.email ||
-                    "N/A"}, Phone: ${newCandidate.phone || "N/A"}`
-                );
-              } catch (e) {
-                addLog("Error parsing resume: " + e.message);
-                message.error("Error parsing resume: " + e.message);
-              }
-              return false; // prevent auto upload
-            }}
-            onRemove={() => {
-              setCandidate({ name: "", email: "", phone: "", answers: [] });
-              setStep(0);
-              addLog("Candidate reset due to resume removal");
-            }}
           >
             <p className="ant-upload-drag-icon">
               <InboxOutlined />
             </p>
             <p>Click or drag file to upload (PDF/DOCX)</p>
           </Dragger>
-
-          {(candidate.name || candidate.email || candidate.phone) && (
-            <div style={{ marginTop: "10px" }}>
-              <strong>Uploaded Resume Info:</strong>
-              <div>Name: {candidate.name}</div>
-              <div>Email: {candidate.email || "N/A"}</div>
-              <div>Phone: {candidate.phone || "N/A"}</div>
-            </div>
-          )}
         </>
       )}
 
-      {/* Step 1: Fill Missing */}
+      {/* Fill Missing Details */}
       {step === 1 && (
         <>
           <Title level={3}>Fill Missing Details</Title>
-          {!candidate.name && (
-            <Input
-              placeholder="Name"
-              value={candidate.name}
-              onChange={(e) => setCandidate({ ...candidate, name: e.target.value })}
-              style={{ marginBottom: "10px" }}
-            />
-          )}
-          {!candidate.email && (
-            <Input
-              placeholder="Email"
-              value={candidate.email}
-              onChange={(e) => setCandidate({ ...candidate, email: e.target.value })}
-              style={{ marginBottom: "10px" }}
-            />
-          )}
-          {!candidate.phone && (
-            <Input
-              placeholder="Phone"
-              value={candidate.phone}
-              onChange={(e) => setCandidate({ ...candidate, phone: e.target.value })}
-            />
-          )}
-          <Button type="primary" onClick={handleFillMissing} style={{ marginTop: "10px" }}>
+
+          <label htmlFor="candidate-name">Name</label>
+          <Input
+            id="candidate-name"
+            name="name"
+            placeholder="Name"
+            value={candidate.name}
+            onChange={(e) =>
+              setCandidate({ ...candidate, name: e.target.value })
+            }
+            style={{ marginBottom: "10px" }}
+          />
+
+          <label htmlFor="candidate-email">Email</label>
+          <Input
+            id="candidate-email"
+            name="email"
+            placeholder="Email"
+            value={candidate.email}
+            onChange={(e) =>
+              setCandidate({ ...candidate, email: e.target.value })
+            }
+            style={{ marginBottom: "10px" }}
+          />
+
+          <label htmlFor="candidate-phone">Phone</label>
+          <Input
+            id="candidate-phone"
+            name="phone"
+            placeholder="Phone"
+            value={candidate.phone}
+            onChange={(e) =>
+              setCandidate({ ...candidate, phone: e.target.value })
+            }
+            style={{ marginBottom: "10px" }}
+          />
+
+          <Button
+            type="primary"
+            onClick={handleFillMissing}
+            style={{ marginTop: "10px" }}
+          >
             Start Interview
           </Button>
         </>
       )}
 
-      {/* Step 2: Interview */}
-      {step === 2 && currentQIndex < questions.length && (
-        <>
+      {/* Step 2: Questions */}
+        {step === 2 && (
+  <>
+    {candidate.questions?.length > 0 || candidate.answers?.length > 0 ? (
+      currentQIndex < (candidate.questions?.length || candidate.answers?.length) ? (
+        // Show current question
+        <div>
           <Title level={4}>
-            Question ({questions[currentQIndex].level} - {timer}s left)
+            Question ({currentQuestion.level} - {timer}s left)
           </Title>
-          <Text>{questions[currentQIndex].question}</Text>
+          <Text>{currentQuestion.question}</Text>
           <Input.TextArea
             rows={4}
             value={answer}
@@ -272,50 +323,53 @@ export default function Interviewee() {
             Submit Answer
           </Button>
           <Progress
-            percent={((currentQIndex + 1) / questions.length) * 100}
+            percent={
+              ((currentQIndex + 1) / (candidate.questions?.length || candidate.answers?.length)) * 100
+            }
             style={{ marginTop: "10px" }}
           />
+          {console.log("Rendering question", currentQIndex)}
+        </div>
+      ) : (
+
+        <div>
+        <Title level={4}>All questions answered!</Title>
+        <Text>You have answered all questions. Click below to finalize your interview.</Text>
+        <Button type="primary" onClick={handleFinish} style={{ marginTop: "10px" }}>
+          Finish Interview
+        </Button>
+        {console.log("Step 2: all questions completed")}
+      </div>
+      )
+    ) : (
+      <div>
+        <Title level={4}>No questions available!</Title>
+        <Text>Please upload your resume to start the interview.</Text>
+      </div>
+    )}
+  </>
+)}
+
+
+      {/* Interview Completed */}
+      {step === 3 && (
+        <>
+          <Title level={3}>Interview Completed!</Title>
+          <p><strong>Name:</strong> {candidate.name}</p>
+          <p><strong>Email:</strong> {candidate.email}</p>
+          <p><strong>Phone:</strong> {candidate.phone}</p>
+          <p><strong>Summary:</strong> {candidate.summary}</p>
+          <p>
+            <strong>Score:</strong>{" "}
+            {answers.reduce((acc, a) => acc + (a.score || 0), 0)}
+          </p>
+              <Button type="primary" onClick={() => setStep(0)} style={{ marginTop: "20px" }}>
+                Upload New Resume
+              </Button>
         </>
       )}
 
-      {/* Step 3: Completed */}
-      {step === 3 && (
-        <div>
-          <Title level={3}>Interview Completed!</Title>
-          <p>Thank you for completing the interview.</p>
-          <p>
-            <strong>Name:</strong> {candidate.name}
-          </p>
-          <p>
-            <strong>Email:</strong> {candidate.email || "N/A"}
-          </p>
-          <p>
-            <strong>Phone:</strong> {candidate.phone || "N/A"}
-          </p>
-          <p>
-            <strong>Score:</strong> {candidate.score || calculateScore(candidate.answers)}
-          </p>
-        </div>
-      )}
-
-      {/* Logs */}
-      <div
-        style={{
-          marginTop: "30px",
-          maxHeight: "200px",
-          overflowY: "auto",
-          border: "1px solid #ccc",
-          padding: "10px",
-          background: "#f7f7f7",
-        }}
-      >
-        <strong>Logs:</strong>
-        {logs.map((log, index) => (
-          <div key={index} style={{ fontSize: "12px", marginBottom: "4px" }}>
-            {log}
-          </div>
-        ))}
-      </div>
+      
     </div>
   );
 }
